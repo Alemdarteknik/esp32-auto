@@ -1,0 +1,4 @@
+dependencies:
+  idf: ">=5.1.0"
+  usb_host_ch34x_vcp: "^2"
+  usb_host_vcp: "^1"

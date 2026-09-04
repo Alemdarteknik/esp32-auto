@@ -1,0 +1,37 @@
+idf_component_register(
+    SRCS
+        "main.cpp"
+        "src/app/monitor_output.cpp"
+        "src/app/system_config.cpp"
+        "src/inverter/aohai_register_catalog.generated.cpp"
+        "src/inverter/aohai_registers.cpp"
+        "src/inverter/command_service.cpp"
+        "src/inverter/diagnostic_scanner.cpp"
+        "src/inverter/inverter_command.cpp"
+        "src/inverter/polling_plan.cpp"
+        "src/inverter/production_poller.cpp"
+        "src/inverter/register_value.cpp"
+        "src/inverter/register_command.cpp"
+        "src/inverter/register_command_service.cpp"
+        "src/network/espnow_mesh.cpp"
+        "src/network/coordinator_link.cpp"
+        "src/network/mqtt_bridge.cpp"
+        "src/network/wifi_provisioning.cpp"
+        "src/protocol/modbus_rtu.cpp"
+        "src/transport/usb_rs485.cpp"
+    INCLUDE_DIRS "include"
+    PRIV_REQUIRES
+        usb
+        esp_event
+        esp_driver_gpio
+        esp_driver_uart
+        esp_http_server
+        esp_netif
+        esp_timer
+        esp_wifi
+        json
+        lwip
+        mbedtls
+        mqtt
+        nvs_flash
+)

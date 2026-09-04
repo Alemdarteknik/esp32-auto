@@ -1,0 +1,12 @@
+menu "Universal Modbus inverter gateway"
+
+config INVERTER_GATEWAY_MONITOR_OUTPUT_DEFAULT
+    bool "Enable serial monitor diagnostics by default"
+    default n
+    help
+        Print information messages, Modbus TX/RX frames, and successful CRC
+        checks to the serial monitor by default. The installer can override
+        this from the setup webpage. Warnings and errors remain visible when
+        this is disabled.
+
+endmenu

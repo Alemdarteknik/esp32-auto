@@ -1,0 +1,171 @@
+# Universal Modbus Inverter Gateway (AOHAI Profile)
+
+This component is one universal ESP32-S3 firmware for standalone, native three-phase, and multi-inverter installations. Its behavior is selected from a persistent NVS profile instead of by flashing different binaries.
+
+The gateway framework, networking, MQTT API, topology management, and Modbus RTU transport are vendor-neutral. The bundled inverter register profile currently implements AOHAI Modbus RTU V2.14. A different Modbus inverter can reuse the framework but must provide a matching register profile because Modbus does not standardize inverter register addresses or meanings.
+
+## Implemented runtime
+
+- First-installation Wi-Fi AP and English web configuration page
+- Two-stage validation before leaving AP mode
+- Persistent NVS role, topology, Wi-Fi, MQTT, Modbus, phase, and peer configuration
+- ESP-NOW discovery with saved MAC/member associations
+- Standalone, coordinator, member, separate gateway, and combined coordinator/gateway roles
+- MQTT telemetry for documented polling-plan register blocks
+- MQTT-only semantic and catalog-backed register commands routed to the appropriate inverter
+- Guarded FC06/FC10 Modbus writes with compare-before-write and read-back confirmation
+- Class-based polling for identity, setup, critical, fast, normal, and slow data
+- Complete generated catalog for 265 holding and 422 input registers
+
+The old `DiagnosticScanner` remains available as a diagnostic module, but `app_main` now uses `ProductionPoller`.
+
+The project targets a 2 MiB flash device and selects ESP-IDF's `Single factory app (large), no OTA` layout, which provides a 1,500 KiB factory partition. This firmware does not currently reserve OTA application slots.
+
+## Source layout
+
+```text
+main/
+  main.cpp                                  Role-based application orchestration
+  include/inverter_gateway/
+    app/
+      device_profile.hpp                    Roles and installation topologies
+      project_config.hpp                    Central firmware defaults
+      monitor_output.hpp                    Stored serial-monitor preference
+      system_config.hpp                     Validated persistent configuration
+    inverter/
+      register_catalog.hpp                  Complete register metadata/classes
+      polling_plan.hpp                      Class-based production requests
+      production_poller.hpp                 Due-time polling and telemetry blocks
+      command_service.hpp                   Guarded semantic write service
+      register_command_service.hpp          Catalog-backed read/write command service
+    network/
+      runtime_messages.hpp                  Transport-neutral envelopes
+      wifi_provisioning.hpp                 Wi-Fi and web setup
+      espnow_mesh.hpp                       Discovery and inverter-node routing
+      mqtt_bridge.hpp                       MQTT telemetry and commands
+    protocol/modbus_rtu.hpp                 Modbus RTU functions and CRC
+    transport/usb_rs485.hpp                 CH340/CH341 USB-RS485 transport
+```
+
+Network callbacks never call Modbus directly. Commands enter a FreeRTOS queue and are executed by the single local inverter loop.
+
+## Provisioning
+
+On an empty NVS, the ESP32 creates:
+
+- SSID: `INVERTER-xxxxxx`
+- Password: `inverter-setup`
+- Page: `http://192.168.4.1`
+
+The access point advertises a captive-portal address and answers local DNS requests, so supported phones and computers can open the setup page automatically after joining it. If the operating system does not display its captive-portal window, open `http://192.168.4.1` manually.
+
+Saving the form stores a draft and restarts into discovery mode. Finalization stays blocked until all applicable checks pass:
+
+- the local inverter has answered Modbus, when this ESP has an inverter;
+- the configured number of parallel members has been discovered;
+- a separate gateway has discovered its coordinator;
+- Wi-Fi and MQTT are connected for an MQTT-capable role.
+
+The setup page presents only settings relevant to the selected installation and device role. It scans nearby Wi-Fi networks, fills the selected SSID automatically, treats MQTT username/password as optional, derives parallel member counts, and hides ESP-NOW controls outside applicable parallel inverter roles. The master generates a stable installation ID from its ESP32 MAC address; slaves learn it wirelessly and a separate Internet Gateway learns it through the coordinator cable. An ID override, Modbus address, and MQTT prefix remain under Advanced settings.
+
+Advanced settings also contains **Show detailed ESP serial-monitor output**. The choice is saved separately in NVS and controls information logs, Modbus TX/RX frames, and successful CRC messages. Warnings and errors always remain visible. Firmware defaults—including this setting, polling times, setup AP name/password, Modbus timing, BOOT-button timing, and coordinator-link settings—are centralized in `include/inverter_gateway/app/project_config.hpp`. ESP-IDF menuconfig can additionally force serial-monitor output on with `CONFIG_INVERTER_GATEWAY_MONITOR_OUTPUT_DEFAULT`.
+
+Hold the ESP32-S3 BOOT button (GPIO0 by default) for three seconds either during startup or while the device is operating normally. Outside setup mode, the device saves a setup-mode request and restarts into its access point without erasing the existing configuration.
+
+## MQTT interface
+
+Topic root:
+
+```text
+<prefix>/<device_id>/inverter/<member_id>/
+```
+
+Published topics are non-retained `live`, non-retained command `result`, retained `snapshot/<domain>/<name>/<description>`, retained `alert/<name>`, and retained `availability` (`online`/`offline`). Confirmed named setters refresh the corresponding retained snapshot. The command subscription is:
+
+```text
+<prefix>/<device_id>/inverter/+/command
+```
+
+Example semantic command:
+
+```json
+{
+  "command_id": "10027",
+  "operation": "set_buzzer_enabled",
+  "value": 1
+}
+```
+
+Allowed operations are `set_buzzer_enabled`, `set_bluetooth_enabled`, `set_inverter_enabled`, `set_overload_restart_enabled`, `set_overload_to_bypass_enabled`, and `set_battery_type`. Battery-type commissioning also requires `"commissioning_interlock": true` and a fresh standby/stopped inverter state.
+
+Normal applications can address a catalog entry by name, without knowing its Modbus address:
+
+```json
+{
+  "command_id": "10028",
+  "operation": "get",
+  "space": "input",
+  "name": "Vbat"
+}
+```
+
+```json
+{
+  "command_id": "10029",
+  "operation": "set",
+  "name": "DspBeepOnOff",
+  "value": 1,
+  "expected_value": 0,
+  "confirmed": true
+}
+```
+
+Names come from the English register catalog and are case-sensitive. If the workbook repeats a name, include its exact `description` to disambiguate it. A named 32-bit high-word entry automatically reads/writes its adjacent low word.
+
+Every catalog entry can also be requested explicitly in blocks of at most 24 words. For example:
+
+```json
+{
+    "command_id": "10030",
+  "operation": "read_registers",
+  "space": "input",
+  "address": 125,
+  "count": 20
+}
+```
+
+A raw holding-register write uses compare-before-write protection:
+
+```json
+{
+  "command_id": "10031",
+  "operation": "write_registers",
+  "space": "holding",
+  "address": 207,
+  "count": 1,
+  "values": [1],
+  "expected_values": [0],
+  "confirmed": true
+}
+```
+
+Writes use raw 16-bit register words. They are accepted only for documented writable holding registers and remain subject to the catalog write guard. Standby, commissioning, and service operations require the corresponding inverter state/interlock. Read-only, reserved, unsupported, and `blocked_unvalidated` entries are rejected. See `../doc/MQTT_Register_Command_API.md` for the complete contract.
+
+Telemetry contains the register space, starting address, count, sequence, boot-relative uptime, and an array with address, catalog name, raw value, engineering value, and unit. Large Modbus reads are divided into ESP-NOW-safe blocks without splitting 32-bit values.
+
+## ESP-NOW routing
+
+- Member IDs start at 1; coordinator/standalone uses ID 0.
+- Members announce every five seconds until learned.
+- ESP-NOW packets carry a site hash, so nearby installations using the same channel are not accidentally paired.
+- Coordinators save member MAC addresses in NVS and only accept data from the saved association.
+- A separate Internet Gateway exchanges framed, CRC-checked telemetry, commands, results, and heartbeats with the coordinator over UART1 (TX GPIO17, RX GPIO18, 115200 8N1).
+- All inverter-node ESP32s must share one 2.4 GHz ESP-NOW channel. The separate UART gateway is not part of that ESP-NOW radio group.
+
+ESP-NOW application encryption is not enabled yet. MQTT may use credentials, but certificate provisioning for verified TLS is also not implemented. Treat this networking layer as commissioning/test firmware until both are added.
+
+## Safety boundary
+
+The complete register catalog does not make every register writable. MQTT can read documented readable input/holding registers and can request catalog-marked writable holding registers. Read-only, reserved, unknown and `blocked_unvalidated` entries stay blocked; guarded classes require confirmation, fresh state, compare-before-write, interlocks where applicable, and read-back verification. Write-only service actions cannot be read back and are reported as `sent_unverifiable`.
+
+No build or flash is performed by the source-generation workflow.

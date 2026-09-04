@@ -1,0 +1,77 @@
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+
+#include "esp_err.h"
+#include "inverter_gateway/app/device_profile.hpp"
+
+namespace inverter_gateway::app {
+
+inline constexpr std::size_t max_wifi_ssid_length = 32;
+inline constexpr std::size_t max_wifi_password_length = 64;
+inline constexpr std::size_t max_mqtt_uri_length = 128;
+inline constexpr std::size_t max_mqtt_text_length = 64;
+inline constexpr std::size_t max_site_id_length = 32;
+inline constexpr std::size_t max_saved_peers = 9;
+
+struct SavedPeer {
+    std::uint8_t mac[6]{};
+    std::uint8_t logical_member_id = 0;
+    bool valid = false;
+};
+
+struct SystemConfig {
+    static constexpr std::uint32_t magic_value = 0x49564757; // IVGW
+    static constexpr std::uint16_t current_schema_version = 1;
+
+    std::uint32_t magic = magic_value;
+    std::uint16_t schema_version = current_schema_version;
+    bool provisioned = false;
+    DeviceProfile profile{};
+    char site_id[max_site_id_length + 1]{};
+    char wifi_ssid[max_wifi_ssid_length + 1]{};
+    char wifi_password[max_wifi_password_length + 1]{};
+    char mqtt_uri[max_mqtt_uri_length + 1]{};
+    char mqtt_username[max_mqtt_text_length + 1]{};
+    char mqtt_password[max_mqtt_text_length + 1]{};
+    char mqtt_topic_prefix[max_mqtt_text_length + 1]{"inverter"};
+    std::array<SavedPeer, max_saved_peers> peers{};
+};
+
+enum class ConfigValidation : std::uint8_t {
+    valid,
+    bad_header,
+    role_missing,
+    topology_missing,
+    invalid_counts,
+    invalid_member_id,
+    site_id_required,
+    wifi_required,
+    mqtt_required,
+    espnow_channel_invalid,
+};
+
+ConfigValidation validate_config(const SystemConfig &config);
+const char *config_validation_name(ConfigValidation result);
+bool valid_site_id(const char *text);
+esp_err_t ensure_hardware_site_id(SystemConfig &config);
+bool site_id_is_hardware_default(const SystemConfig &config);
+const char *device_role_name(DeviceRole role);
+bool parse_device_role(const char *text, DeviceRole &role);
+const char *topology_name(SystemTopology topology);
+bool parse_topology(const char *text, SystemTopology &topology);
+const char *phase_assignment_name(PhaseAssignment phase);
+bool parse_phase_assignment(const char *text, PhaseAssignment &phase);
+
+class ConfigStore {
+public:
+    esp_err_t load(SystemConfig &config) const;
+    esp_err_t save(const SystemConfig &config) const;
+    esp_err_t clear() const;
+    esp_err_t load_verification_pending(bool &pending) const;
+    esp_err_t save_verification_pending(bool pending) const;
+};
+
+} // namespace inverter_gateway::app
