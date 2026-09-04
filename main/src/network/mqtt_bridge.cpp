@@ -23,6 +23,7 @@ namespace inverter_gateway::network {
 namespace {
 
 constexpr char tag[] = "mqtt_bridge";
+constexpr char broker_uri[] = "wss://mqtt-esp.alemdarteknik.com:443/mqtt";
 
 bool uses_tls(const char *uri)
 {
@@ -293,13 +294,13 @@ esp_err_t MqttBridge::start()
 {
     if (client_ != nullptr) return ESP_OK;
     ESP_LOGW(tag, "Starting MQTT connection to %s (authentication %s)",
-             config_.mqtt_uri,
+             broker_uri,
              config_.mqtt_username[0] != '\0' ? "enabled" : "disabled");
     publish_queue_ = xQueueCreate(32, sizeof(OutboundMessage));
     if (publish_queue_ == nullptr) return ESP_ERR_NO_MEM;
     esp_mqtt_client_config_t mqtt_config{};
-    mqtt_config.broker.address.uri = config_.mqtt_uri;
-    if (uses_tls(config_.mqtt_uri)) {
+    mqtt_config.broker.address.uri = broker_uri;
+    if (uses_tls(broker_uri)) {
         mqtt_config.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
         ESP_LOGI(tag, "TLS server verification enabled with the ESP certificate bundle");
     }
@@ -394,7 +395,7 @@ void MqttBridge::handle_event(esp_mqtt_event_handle_t event)
                      static_cast<unsigned>(event->error_handle->esp_tls_stack_err),
                      event->error_handle->esp_transport_sock_errno,
                      std::strerror(event->error_handle->esp_transport_sock_errno),
-                     config_.mqtt_uri);
+                     broker_uri);
         }
         break;
     case MQTT_EVENT_DATA:
