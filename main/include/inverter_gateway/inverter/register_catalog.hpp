@@ -83,6 +83,7 @@ enum RegisterFeature : std::uint16_t {
     feature_bms = 1U << 4,
     feature_parallel = 1U << 5,
     feature_service = 1U << 6,
+    feature_pv = 1U << 7,
 };
 
 struct RegisterDescriptor {

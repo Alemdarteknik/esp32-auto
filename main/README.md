@@ -8,7 +8,7 @@ The gateway framework, networking, MQTT API, topology management, and Modbus RTU
 
 - First-installation Wi-Fi AP and English web configuration page
 - Two-stage validation before leaving AP mode
-- Persistent NVS role, topology, Wi-Fi, MQTT, Modbus, phase, and peer configuration
+- Persistent NVS role, topology, connected-PV count, battery/BMS/generator presence, Wi-Fi, MQTT, Modbus, phase, and peer configuration
 - ESP-NOW discovery with saved MAC/member associations
 - Standalone, coordinator, member, separate gateway, and combined coordinator/gateway roles
 - MQTT telemetry for documented polling-plan register blocks
@@ -66,7 +66,9 @@ Saving the form stores a draft and restarts into discovery mode. Finalization st
 - a separate gateway has discovered its coordinator;
 - Wi-Fi and MQTT are connected for an MQTT-capable role.
 
-The setup page presents only settings relevant to the selected installation and device role. It scans nearby Wi-Fi networks, fills the selected SSID automatically, treats MQTT username/password as optional, derives parallel member counts, and hides ESP-NOW controls outside applicable parallel inverter roles. The master generates a stable installation ID from its ESP32 MAC address; slaves learn it wirelessly and a separate Internet Gateway learns it through the coordinator cable. An ID override, Modbus address, and MQTT prefix remain under Advanced settings.
+The setup page presents only settings relevant to the selected installation and device role. Each inverter-facing ESP records how many PV inputs are physically connected and whether a battery, BMS connection, and generator are installed. The poller omits unused equipment blocks where possible, and live MQTT output suppresses unconfigured equipment, three-phase-only values on single-phase inverters, and parallel-only values on standalone systems. Consolidated live MQTT payloads group status, inverter, PV, grid, output, load, battery/BMS, generator, energy, and parallel information. Power is expressed in kW/kVA/kvar and operating codes include readable text. It scans nearby Wi-Fi networks, fills the selected SSID automatically, treats MQTT username/password as optional, derives parallel member counts, and hides ESP-NOW controls outside applicable parallel inverter roles. The master generates a stable installation ID from its ESP32 MAC address; slaves learn it wirelessly and a separate Internet Gateway learns it through the coordinator cable. An ID override, Modbus address, and MQTT prefix remain under Advanced settings.
+
+After setup, MQTT-capable devices continue serving the configuration page at `http://esp32.local` and at their assigned LAN IP address. The phone or computer must be connected to the same local Wi-Fi network. The setup access point remains disabled during normal operation.
 
 Advanced settings also contains **Show detailed ESP serial-monitor output**. The choice is saved separately in NVS and controls information logs, Modbus TX/RX frames, and successful CRC messages. Warnings and errors always remain visible. Firmware defaults—including this setting, polling times, setup AP name/password, Modbus timing, BOOT-button timing, and coordinator-link settings—are centralized in `include/inverter_gateway/app/project_config.hpp`. ESP-IDF menuconfig can additionally force serial-monitor output on with `CONFIG_INVERTER_GATEWAY_MONITOR_OUTPUT_DEFAULT`.
 

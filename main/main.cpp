@@ -131,9 +131,15 @@ private:
 std::uint16_t enabled_features(const inverter_gateway::app::SystemConfig &config)
 {
     using namespace inverter_gateway::inverter;
-    std::uint16_t features = feature_battery | feature_generator;
+    std::uint16_t features = feature_none;
+    if (config.profile.connected_pv_inputs > 0) features |= feature_pv;
+    if (config.profile.connected_pv_inputs > 2) features |= feature_extended_pv;
+    if (config.profile.battery_installed) features |= feature_battery;
+    if (config.profile.battery_installed && config.profile.bms_connected) {
+        features |= feature_bms;
+    }
+    if (config.profile.generator_installed) features |= feature_generator;
     if (config.profile.topology == inverter_gateway::app::SystemTopology::standalone_native_three_phase ||
-        config.profile.topology == inverter_gateway::app::SystemTopology::parallel_three_phase_groups ||
         config.profile.topology == inverter_gateway::app::SystemTopology::parallel_native_three_phase) {
         features |= feature_three_phase;
     }
@@ -171,7 +177,9 @@ std::uint16_t enabled_features(const inverter_gateway::app::SystemConfig &config
             inverter_gateway::app::modbus_response_timeout_ms,
             inverter_gateway::app::modbus_minimum_command_gap_ms);
         inverter_gateway::inverter::ProductionPoller poller(
-            client, config.profile.logical_member_id, runtime);
+            client, config.profile.logical_member_id,
+            config.profile.connected_pv_inputs,
+            static_cast<std::uint8_t>(config.profile.phase), runtime);
         inverter_gateway::inverter::CommandService commands(client);
         inverter_gateway::inverter::RegisterCommandService register_commands(client);
 
@@ -404,12 +412,14 @@ extern "C" void app_main(void)
         mesh = std::make_unique<inverter_gateway::network::EspNowMesh>(config, runtime);
         runtime.attach_mesh(mesh.get());
         ESP_ERROR_CHECK(mesh->start());
+        wifi.set_mesh(mesh.get());
     }
 
     std::unique_ptr<inverter_gateway::network::CoordinatorLink> coordinator_link;
     if (inverter_gateway::app::role_uses_coordinator_link(config.profile.device_role)) {
         coordinator_link = std::make_unique<inverter_gateway::network::CoordinatorLink>(config, runtime);
         runtime.attach_coordinator_link(coordinator_link.get());
+        wifi.set_coordinator_link(coordinator_link.get());
         ESP_ERROR_CHECK(coordinator_link->start());
     }
 
@@ -423,10 +433,19 @@ extern "C" void app_main(void)
         const esp_err_t mqtt_start_result = mqtt->start();
         if (mqtt_start_result == ESP_OK) {
             runtime.attach_mqtt(mqtt.get());
+            wifi.set_mqtt_ready_probe(mqtt_ready, mqtt.get());
         } else {
             ESP_LOGE(tag, "MQTT could not start: %s",
                      esp_err_to_name(mqtt_start_result));
             mqtt.reset();
+        }
+    }
+
+    if (inverter_gateway::app::role_uses_mqtt(config.profile.device_role)) {
+        const esp_err_t webpage_result = wifi.start_lan_page();
+        if (webpage_result != ESP_OK) {
+            ESP_LOGE(tag, "Configuration webpage could not start: %s",
+                     esp_err_to_name(webpage_result));
         }
     }
 

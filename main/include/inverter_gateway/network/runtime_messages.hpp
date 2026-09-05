@@ -23,6 +23,9 @@ enum class RemoteCommandOrigin : std::uint8_t {
 struct TelemetryMessage {
     std::uint8_t source_member_id = 0;
     std::uint8_t register_space = 0; // 0=holding, 1=input
+    std::uint8_t connected_pv_inputs = 0;
+    std::uint8_t phase_assignment = 0;
+    std::uint16_t enabled_features = 0;
     std::uint16_t first_register = 0;
     std::uint16_t register_count = 0;
     std::uint32_t sequence = 0;

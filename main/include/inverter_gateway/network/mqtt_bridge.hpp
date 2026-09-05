@@ -24,6 +24,25 @@ public:
     void publish_command_result(const RoutedCommandResult &result);
 
 private:
+    static constexpr std::size_t alert_point_count = 512;
+    static constexpr std::size_t input_point_count = 499;
+    static constexpr std::size_t maximum_members = app::max_saved_peers + 1;
+
+    struct LiveCache {
+        std::array<std::uint16_t, input_point_count> values{};
+        std::array<bool, input_point_count> seen{};
+        std::uint16_t enabled_features = 0;
+        std::uint16_t source_priority = 0;
+        bool source_priority_seen = false;
+        double rated_power_w = 0.0;
+        bool rated_power_seen = false;
+        std::uint8_t connected_pv_inputs = 0;
+        std::uint8_t phase_assignment = 0;
+        std::uint32_t sequence = 0;
+        std::int64_t timestamp_ms = 0;
+        std::int64_t last_publish_ms = 0;
+    };
+
     static void event_callback(void *argument, esp_event_base_t base,
                                std::int32_t event_id, void *event_data);
     void handle_event(esp_mqtt_event_handle_t event);
@@ -49,8 +68,7 @@ private:
     char availability_topic_[192]{};
     std::array<std::uint64_t, 32> recent_command_ids_{};
     std::size_t next_command_id_slot_ = 0;
-    static constexpr std::size_t alert_point_count = 512;
-    static constexpr std::size_t maximum_members = app::max_saved_peers + 1;
+    std::array<LiveCache, maximum_members> live_cache_{};
     std::array<std::array<std::uint16_t, alert_point_count>, maximum_members>
         alert_values_{};
     std::array<std::array<bool, alert_point_count>, maximum_members> alert_seen_{};

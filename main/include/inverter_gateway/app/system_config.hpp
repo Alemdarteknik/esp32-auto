@@ -24,7 +24,7 @@ struct SavedPeer {
 
 struct SystemConfig {
     static constexpr std::uint32_t magic_value = 0x49564757; // IVGW
-    static constexpr std::uint16_t current_schema_version = 1;
+    static constexpr std::uint16_t current_schema_version = 3;
 
     std::uint32_t magic = magic_value;
     std::uint16_t schema_version = current_schema_version;
@@ -47,6 +47,8 @@ enum class ConfigValidation : std::uint8_t {
     topology_missing,
     invalid_counts,
     invalid_member_id,
+    invalid_pv_input_count,
+    invalid_battery_configuration,
     site_id_required,
     wifi_required,
     mqtt_required,

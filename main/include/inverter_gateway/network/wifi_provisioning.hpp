@@ -20,6 +20,7 @@ public:
     esp_err_t start_station();
     esp_err_t start_radio(std::uint8_t channel);
     esp_err_t start_portal();
+    esp_err_t start_lan_page();
     void set_mqtt_ready_probe(ReadyProbe probe, void *context);
     void set_inverter_ready_probe(ReadyProbe probe, void *context);
     void set_mesh(EspNowMesh *mesh);

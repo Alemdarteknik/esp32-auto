@@ -32,6 +32,7 @@ idf_component_register(
         json
         lwip
         mbedtls
+        mdns
         mqtt
         nvs_flash
 )

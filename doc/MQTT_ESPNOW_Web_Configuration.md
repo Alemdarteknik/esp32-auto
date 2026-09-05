@@ -10,7 +10,7 @@
 | `internet_gateway` | No | No | Yes | Bridges the coordinator UART link to MQTT. |
 | `coordinator_gateway_combined` | Yes | Coordinator | Yes | Reads the master, gathers members, and publishes MQTT itself. |
 
-Native three-phase and grouped three-phase installations use the topology and phase fields. Each inverter-facing ESP32 still talks only to its locally attached inverter, so individual PV1/PV2 values remain identifiable by member ID.
+Native three-phase and grouped three-phase installations use the topology and phase fields. Each inverter-facing ESP32 also stores its number of physically connected PV inputs. It still talks only to its locally attached inverter, so each member's PV values remain individually identifiable.
 
 ## Installation sequence
 
@@ -25,6 +25,14 @@ Joining the `INVERTER-xxxxxx` setup access point triggers standard captive-porta
 The Advanced settings section can enable detailed ESP serial-monitor output for commissioning or troubleshooting. When disabled, routine information messages, Modbus frame dumps, and successful CRC messages are suppressed while warnings and errors remain visible. This preference is stored separately in NVS. Firmware defaults are centralized in `main/include/inverter_gateway/app/project_config.hpp`; ESP-IDF menuconfig can additionally force monitor output on with `CONFIG_INVERTER_GATEWAY_MONITOR_OUTPUT_DEFAULT`.
 
 Peer associations survive restart in NVS. Changing role, topology, member ID, or ESP-NOW channel clears the old associations and starts discovery again.
+
+The **Connected PV inputs** selection accepts 0 through 16. The fast PV1/PV2 block is shortened at its end when fewer than two inputs are configured. The PV3-PV16 block is skipped when it is unnecessary and otherwise shortened to the selected channel count. Individual PV-power polling is also limited to the selected count. Blocks containing both PV and non-PV measurements must still be read, but the MQTT encoder removes the unused PV fields.
+
+The installation page also records whether a battery, BMS communication link, and generator are present. No battery blocks are polled when no battery is installed. With a non-communicating battery, ordinary battery values remain enabled while the BMS block is skipped. Generator blocks are skipped unless a generator is selected, and generator S/T blocks are limited to native three-phase inverters.
+
+Live filtering also follows the selected topology. Single-phase and grouped single-phase nodes omit S/T and other three-phase-only fields. Native three-phase nodes retain R/S/T fields. Standalone systems omit parallel-only fields, while parallel systems retain them. Each routed telemetry message carries this applicability information, so a separate Internet Gateway applies the originating inverter's settings rather than its own.
+
+After commissioning, an MQTT-capable ESP continues to serve the page at `http://esp32.local` and at its LAN IP. The client must be on the same Wi-Fi network. This does not reactivate the setup access point. Saving a changed configuration restarts connection verification before returning to normal operation.
 
 The master ESP creates a device ID from its Wi-Fi station MAC address, for example `INV-7CDFA1123456`. During commissioning, slave ESPs learn and save that ID from the master over ESP-NOW. A separate Internet Gateway learns and saves it from the master through the coordinator cable, then restarts before connecting to MQTT. After finalization, a device will not adopt a different device ID. The advanced web settings retain an optional ID override for restoring an existing installation.
 

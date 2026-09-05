@@ -23,8 +23,6 @@ namespace inverter_gateway::network {
 namespace {
 
 constexpr char tag[] = "mqtt_bridge";
-constexpr char broker_uri[] = "wss://mqtt-esp.alemdarteknik.com:443/mqtt";
-
 bool uses_tls(const char *uri)
 {
     return uri != nullptr &&
@@ -294,13 +292,13 @@ esp_err_t MqttBridge::start()
 {
     if (client_ != nullptr) return ESP_OK;
     ESP_LOGW(tag, "Starting MQTT connection to %s (authentication %s)",
-             broker_uri,
+             config_.mqtt_uri,
              config_.mqtt_username[0] != '\0' ? "enabled" : "disabled");
     publish_queue_ = xQueueCreate(32, sizeof(OutboundMessage));
     if (publish_queue_ == nullptr) return ESP_ERR_NO_MEM;
     esp_mqtt_client_config_t mqtt_config{};
-    mqtt_config.broker.address.uri = broker_uri;
-    if (uses_tls(broker_uri)) {
+    mqtt_config.broker.address.uri = config_.mqtt_uri;
+    if (uses_tls(config_.mqtt_uri)) {
         mqtt_config.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
         ESP_LOGI(tag, "TLS server verification enabled with the ESP certificate bundle");
     }
@@ -380,11 +378,12 @@ void MqttBridge::handle_event(esp_mqtt_event_handle_t event)
                       config_.mqtt_topic_prefix, config_.site_id);
         esp_mqtt_client_subscribe(client_, topic, 1);
         esp_mqtt_client_publish(client_, availability_topic_, "online", 0, 1, 1);
-        ESP_LOGI(tag, "MQTT connected; subscribed to %s", topic);
+        ESP_LOGW(tag, "MQTT connected; subscribed to %s", topic);
         break;
     }
     case MQTT_EVENT_DISCONNECTED:
         connected_ = false;
+        ESP_LOGW(tag, "MQTT disconnected from %s", config_.mqtt_uri);
         break;
     case MQTT_EVENT_ERROR:
         if (event->error_handle != nullptr) {
@@ -395,7 +394,7 @@ void MqttBridge::handle_event(esp_mqtt_event_handle_t event)
                      static_cast<unsigned>(event->error_handle->esp_tls_stack_err),
                      event->error_handle->esp_transport_sock_errno,
                      std::strerror(event->error_handle->esp_transport_sock_errno),
-                     broker_uri);
+                     config_.mqtt_uri);
         }
         break;
     case MQTT_EVENT_DATA:
@@ -522,6 +521,189 @@ bool is_public_descriptor(const inverter::RegisterDescriptor *descriptor)
            !inverter::descriptor_is_low_word(*descriptor);
 }
 
+std::uint8_t pv_input_index(const inverter::RegisterDescriptor &descriptor)
+{
+    if (descriptor.space != inverter::RegisterSpace::input) return 0;
+    if (descriptor.address >= 64 && descriptor.address <= 95) {
+        return static_cast<std::uint8_t>((descriptor.address - 64) / 2 + 1);
+    }
+    if (descriptor.address >= 252 && descriptor.address <= 283) {
+        return static_cast<std::uint8_t>((descriptor.address - 252) / 2 + 1);
+    }
+    return 0;
+}
+
+bool descriptor_is_enabled(const inverter::RegisterDescriptor &descriptor,
+                           std::uint16_t enabled_features,
+                           std::uint8_t connected_pv_inputs)
+{
+    if (descriptor.feature_flags != inverter::feature_none &&
+        (enabled_features & descriptor.feature_flags) != descriptor.feature_flags) {
+        return false;
+    }
+    if ((enabled_features & inverter::feature_three_phase) == 0 &&
+        descriptor.applicable_models != nullptr &&
+        std::strstr(descriptor.applicable_models, "Single-phase not supported") != nullptr) {
+        return false;
+    }
+    if (descriptor.domain == inverter::RegisterDomain::pv && connected_pv_inputs == 0) {
+        return false;
+    }
+    const std::uint8_t input = pv_input_index(descriptor);
+    return input == 0 || input <= connected_pv_inputs;
+}
+
+const char *application_name(const inverter::RegisterDescriptor &descriptor)
+{
+    return descriptor.description != nullptr && descriptor.description[0] != '\0'
+               ? descriptor.description
+               : descriptor.name;
+}
+
+const char *engineering_unit(const inverter::RegisterDescriptor &descriptor)
+{
+    const char *unit = descriptor.unit == nullptr ? "" : descriptor.unit;
+    if (std::strcmp(descriptor.name, "SOC") == 0 ||
+        std::strcmp(descriptor.name, "MaxSOC") == 0 ||
+        std::strcmp(descriptor.name, "MinSOC") == 0 ||
+        std::strcmp(descriptor.name, "BMS_SOH") == 0) return "%";
+    if (std::strcmp(descriptor.name, "Loadpercent") == 0 ||
+        std::strcmp(descriptor.name, "RealOPPercent") == 0) return "%";
+    if (std::strcmp(unit, "0.1V") == 0 || std::strcmp(unit, "0.01V") == 0 ||
+        std::strcmp(unit, "0.001V") == 0 || std::strcmp(unit, "1V") == 0) return "V";
+    if (std::strcmp(unit, "0.1A") == 0 || std::strcmp(unit, "0.01A") == 0 ||
+        std::strcmp(unit, "1A") == 0) return "A";
+    if (std::strcmp(unit, "0.1W") == 0 || std::strcmp(unit, "10W") == 0) return "kW";
+    if (std::strcmp(unit, "0.1VA") == 0) return "kVA";
+    if (std::strcmp(unit, "0.1var") == 0) return "kvar";
+    if (std::strcmp(unit, "0.01Hz") == 0) return "Hz";
+    if (std::strcmp(unit, "0.1C deg") == 0) return "C";
+    if (std::strcmp(unit, "0.1Ah") == 0) return "Ah";
+    if (std::strcmp(unit, "0.1kWh") == 0 || std::strcmp(unit, "0.1kwh") == 0) return "kWh";
+    if (std::strcmp(unit, "1s") == 0) return "s";
+    if (std::strcmp(unit, "0.5min") == 0 || std::strcmp(unit, "1min") == 0) return "min";
+    if (std::strcmp(unit, "1kohm") == 0) return "kOhm";
+    if (std::strcmp(unit, "1mV") == 0) return "mV";
+    if (std::strcmp(unit, "1mA") == 0) return "mA";
+    if (std::strcmp(unit, "20ms") == 0) return "ms";
+    if (std::strcmp(unit, "1DAY") == 0) return "day";
+    if (std::strcmp(unit, "1%Pn") == 0 || std::strcmp(unit, "1Pn%") == 0) return "%Pn";
+    if (std::strcmp(unit, "0.1Pn%/min") == 0 ||
+        std::strcmp(unit, "0.1Pn/min") == 0) return "%Pn/min";
+    if (std::strcmp(unit, "1E-4") == 0 || std::strcmp(unit, "0.01") == 0) return "";
+    return unit;
+}
+
+double published_value(const inverter::RegisterDescriptor &descriptor,
+                       double engineering_value)
+{
+    const char *unit = descriptor.unit == nullptr ? "" : descriptor.unit;
+    if (std::strcmp(unit, "0.1W") == 0 || std::strcmp(unit, "10W") == 0 ||
+        std::strcmp(unit, "0.1VA") == 0 || std::strcmp(unit, "0.1var") == 0) {
+        return engineering_value / 1000.0;
+    }
+    return engineering_value;
+}
+
+const char *inverter_status_text(std::uint16_t value)
+{
+    switch (value) {
+    case 0: return "Waiting";
+    case 1: return "On-grid";
+    case 2: return "Off-grid";
+    case 3: return "Fault";
+    case 4: return "Firmware update";
+    case 5: return "Bypass";
+    case 6: return "Self-charging";
+    default: return "Unknown";
+    }
+}
+
+const char *priority_text(std::uint16_t value)
+{
+    switch (value) {
+    case 0: return "Load first";
+    case 1: return "Battery first";
+    case 2: return "Grid first";
+    default: return "Unknown";
+    }
+}
+
+const char *source_priority_text(std::uint16_t value)
+{
+    switch (value) {
+    case 0: return "SOL";
+    case 1: return "UTI";
+    case 2: return "SBU";
+    case 10: return "Grid-connected output";
+    default: return "Unknown";
+    }
+}
+
+const char *live_section(const inverter::RegisterDescriptor &descriptor)
+{
+    if (descriptor.read_class == inverter::RegisterReadClass::critical_status) {
+        return "status";
+    }
+    switch (descriptor.domain) {
+    case inverter::RegisterDomain::pv: return "pv";
+    case inverter::RegisterDomain::grid: return "grid";
+    case inverter::RegisterDomain::eps: return "output";
+    case inverter::RegisterDomain::load:
+        return std::strstr(descriptor.name, "grid") != nullptr ||
+               std::strstr(descriptor.name, "Grid") != nullptr
+                   ? "grid" : "output";
+    case inverter::RegisterDomain::battery: return "battery";
+    case inverter::RegisterDomain::bms: return "bms";
+    case inverter::RegisterDomain::generator: return "generator";
+    case inverter::RegisterDomain::energy: return "energy";
+    case inverter::RegisterDomain::parallel: return "parallel";
+    case inverter::RegisterDomain::system:
+    case inverter::RegisterDomain::inverter: return "inverter";
+    case inverter::RegisterDomain::power:
+        if (std::strstr(descriptor.name, "Pcharge") != nullptr ||
+            std::strstr(descriptor.name, "Pdischarge") != nullptr ||
+            std::strstr(descriptor.name, "charge Power") != nullptr) {
+            return "battery";
+        }
+        if (std::strstr(descriptor.name, "grid") != nullptr ||
+            std::strstr(descriptor.name, "Grid") != nullptr) return "grid";
+        return "output";
+    default: return "other";
+    }
+}
+
+const char *telemetry_topology(std::uint16_t features, std::uint8_t phase)
+{
+    const bool parallel = (features & inverter::feature_parallel) != 0;
+    const bool native_three_phase = (features & inverter::feature_three_phase) != 0;
+    const auto assignment = static_cast<app::PhaseAssignment>(phase);
+    if (!parallel) {
+        return native_three_phase ? "standalone_native_three_phase"
+                                  : "standalone_single_phase";
+    }
+    if (native_three_phase) return "parallel_native_three_phase";
+    if (assignment == app::PhaseAssignment::phase_1 ||
+        assignment == app::PhaseAssignment::phase_2 ||
+        assignment == app::PhaseAssignment::phase_3) {
+        return "parallel_three_phase_groups";
+    }
+    return "parallel_single_phase";
+}
+
+// Raw numeric JSON preserves the two decimal places without making a string.
+cJSON *add_decimal_value(cJSON *object, const char *key, double value)
+{
+    if (!std::isfinite(value)) return cJSON_AddNullToObject(object, key);
+    char number[384]{};
+    if (std::fabs(value) < 0.005) value = 0.0;
+    const int length = std::snprintf(number, sizeof(number), "%.2f", value);
+    if (length < 0 || static_cast<std::size_t>(length) >= sizeof(number)) {
+        return cJSON_AddNullToObject(object, key);
+    }
+    return cJSON_AddRawToObject(object, key, number);
+}
+
 void add_application_value(cJSON *object, const char *key,
                            const inverter::RegisterDescriptor &descriptor,
                            const std::uint16_t *values, std::uint16_t count)
@@ -536,31 +718,38 @@ void add_application_value(cJSON *object, const char *key,
     }
     const auto decoded = inverter::decode_numeric_value(
         descriptor, values[0], count > 1 ? values[1] : 0, count > 1);
-    if (decoded.valid) cJSON_AddNumberToObject(object, key, decoded.engineering_value);
+    if (decoded.valid) {
+        const double value = published_value(descriptor, decoded.engineering_value);
+        if (descriptor.scale != 1.0 || value != decoded.engineering_value) {
+            add_decimal_value(object, key, value);
+        } else {
+            cJSON_AddNumberToObject(object, key, value);
+        }
+    }
     else if (descriptor.data_type == inverter::RegisterDataType::ascii_or_uint16) {
         cJSON_AddNumberToObject(object, key, values[0] * descriptor.scale);
     }
     else cJSON_AddNullToObject(object, key);
 }
 
-void add_application_details(cJSON *root, const char *key,
-                             inverter::RegisterSpace space, std::uint16_t first,
-                             std::uint16_t count, const std::uint16_t *values)
+cJSON *add_calculated_section_entry(cJSON *sections, const char *section_name,
+                                    const char *name, const char *description,
+                                    const char *domain, const char *unit,
+                                    double value, const char *source)
 {
-    cJSON *entries = cJSON_AddArrayToObject(root, key);
-    for (std::uint16_t index = 0; index < count; ++index) {
-        const auto *descriptor = inverter::find_register(space, first + index);
-        if (!is_public_descriptor(descriptor)) continue;
-        cJSON *entry = cJSON_CreateObject();
-        cJSON_AddStringToObject(entry, "name", descriptor->name);
-        cJSON_AddStringToObject(entry, "description", descriptor->description);
-        cJSON_AddStringToObject(entry, "domain",
-                                inverter::register_domain_name(descriptor->domain));
-        cJSON_AddStringToObject(entry, "unit", descriptor->unit);
-        add_application_value(entry, "value", *descriptor, values + index,
-                              static_cast<std::uint16_t>(count - index));
-        cJSON_AddItemToArray(entries, entry);
-    }
+    cJSON *entries = cJSON_GetObjectItemCaseSensitive(sections, section_name);
+    if (entries == nullptr) return nullptr;
+    cJSON *entry = cJSON_CreateObject();
+    if (entry == nullptr) return nullptr;
+    cJSON_AddStringToObject(entry, "name", name);
+    cJSON_AddStringToObject(entry, "register_name", "");
+    cJSON_AddStringToObject(entry, "description", description);
+    cJSON_AddStringToObject(entry, "domain", domain);
+    cJSON_AddStringToObject(entry, "unit", unit);
+    add_decimal_value(entry, "value", value);
+    cJSON_AddStringToObject(entry, "source", source);
+    cJSON_AddItemToArray(entries, entry);
+    return entry;
 }
 
 void make_topic_component(const char *input, char *output, std::size_t capacity)
@@ -645,23 +834,409 @@ void MqttBridge::publish_telemetry_now(const TelemetryMessage &message)
 
 void MqttBridge::publish_live(const TelemetryMessage &message)
 {
+    if (message.source_member_id >= maximum_members) return;
+    LiveCache &cache = live_cache_[message.source_member_id];
+    const std::uint16_t count = std::min<std::uint16_t>(
+        message.register_count,
+        static_cast<std::uint16_t>(message.registers.size()));
+    for (std::uint16_t index = 0; index < count; ++index) {
+        const std::uint32_t address =
+            static_cast<std::uint32_t>(message.first_register) + index;
+        if (address >= input_point_count) continue;
+        cache.values[address] = message.registers[index];
+        cache.seen[address] = true;
+    }
+    cache.enabled_features = message.enabled_features;
+    cache.connected_pv_inputs = message.connected_pv_inputs;
+    cache.phase_assignment = message.phase_assignment;
+    cache.sequence = message.sequence;
+    cache.timestamp_ms = message.timestamp_ms;
+
+    // The core status block is supported by every inverter profile and is the
+    // heartbeat for a live update.  Do not wait for the optional 284-356
+    // power block: older/smaller inverter maps can reject that range, which
+    // previously prevented the live topic from ever being published.
+    const bool live_publish_tick =
+        message.first_register == 0 && count != 0 &&
+        cache.timestamp_ms != cache.last_publish_ms;
+    if (!live_publish_tick) return;
+
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "member_id", message.source_member_id);
-    cJSON_AddNumberToObject(root, "sequence", message.sequence);
-    cJSON_AddNumberToObject(root, "uptime_ms", static_cast<double>(message.timestamp_ms));
-    add_application_details(
-        root, "data", inverter::RegisterSpace::input, message.first_register,
-        std::min<std::uint16_t>(message.register_count,
-                               static_cast<std::uint16_t>(message.registers.size())),
-        message.registers.data());
+    cJSON_AddNumberToObject(root, "sequence", cache.sequence);
+    cJSON_AddNumberToObject(root, "uptime_ms", static_cast<double>(cache.timestamp_ms));
+    cJSON_AddNumberToObject(root, "connected_pv_inputs",
+                            cache.connected_pv_inputs);
+    cJSON_AddStringToObject(root, "topology",
+                            telemetry_topology(cache.enabled_features,
+                                               cache.phase_assignment));
+    cJSON_AddBoolToObject(root, "battery_installed",
+                          (cache.enabled_features & inverter::feature_battery) != 0);
+    cJSON_AddBoolToObject(root, "bms_connected",
+                          (cache.enabled_features & inverter::feature_bms) != 0);
+    cJSON_AddBoolToObject(root, "generator_installed",
+                          (cache.enabled_features & inverter::feature_generator) != 0);
+    cJSON_AddStringToObject(
+        root, "phase",
+        app::phase_assignment_name(
+            static_cast<app::PhaseAssignment>(cache.phase_assignment)));
+    cJSON *operating = cJSON_AddObjectToObject(root, "operating_status");
+    if (cache.seen[0]) {
+        const std::uint16_t raw_status = cache.values[0];
+        const bool running = raw_status == 1 || raw_status == 2 ||
+                             raw_status == 5 || raw_status == 6 ||
+                             raw_status == 7;
+        cJSON_AddNumberToObject(operating, "value", raw_status);
+        cJSON_AddBoolToObject(operating, "running", running);
+        cJSON_AddStringToObject(
+            operating, "running_status",
+            inverter_status_text(raw_status));
+    }
+    if (cache.source_priority_seen) {
+        cJSON_AddNumberToObject(operating, "operating_mode_value",
+                                cache.source_priority);
+        cJSON_AddStringToObject(operating, "operating_mode",
+                                source_priority_text(cache.source_priority));
+    }
+    if ((cache.enabled_features & inverter::feature_battery) != 0 &&
+        cache.seen[125]) {
+        cJSON_AddStringToObject(operating, "energy_priority",
+                                priority_text(cache.values[125]));
+    }
+
+    auto decoded_published_value = [&cache](std::uint16_t address,
+                                            double &value) {
+        if (address >= input_point_count || !cache.seen[address]) return false;
+        const auto *descriptor = inverter::find_register(
+            inverter::RegisterSpace::input, address);
+        if (!is_public_descriptor(descriptor)) return false;
+        const bool next_seen = address + 1 < input_point_count &&
+                               cache.seen[address + 1];
+        const auto decoded = inverter::decode_numeric_value(
+            *descriptor, cache.values[address],
+            next_seen ? cache.values[address + 1] : 0, next_seen);
+        if (!decoded.valid) return false;
+        value = published_value(*descriptor, decoded.engineering_value);
+        return true;
+    };
+
+    auto signed_input_value = [&cache](std::uint16_t address, double scale,
+                                       double &value) {
+        if (address >= input_point_count || !cache.seen[address]) return false;
+        value = static_cast<std::int16_t>(cache.values[address]) * scale;
+        return true;
+    };
+
+    const bool three_phase =
+        (cache.enabled_features & inverter::feature_three_phase) != 0;
+    const bool phase_r_available = cache.seen[55] && cache.seen[56];
+    const bool phase_s_available = cache.seen[57] && cache.seen[58];
+    const bool phase_t_available = cache.seen[59] && cache.seen[60];
+    bool output_apparent_power_available = false;
+    std::uint8_t output_phase_count = 0;
+    double output_apparent_power_va = 0.0;
+    if (phase_r_available &&
+        (!three_phase || (phase_s_available && phase_t_available))) {
+        output_apparent_power_va =
+            (cache.values[55] * 0.1) * (cache.values[56] * 0.1);
+        output_phase_count = 1;
+        if (three_phase) {
+            output_apparent_power_va +=
+                (cache.values[57] * 0.1) * (cache.values[58] * 0.1);
+            output_apparent_power_va +=
+                (cache.values[59] * 0.1) * (cache.values[60] * 0.1);
+            output_phase_count = 3;
+        }
+        output_apparent_power_available = true;
+    }
+
+    bool pv_power_available = false;
+    bool pv_power_calculated = false;
+    double pv_power_kw = 0.0;
+    if (!decoded_published_value(250, pv_power_kw)) {
+        const std::uint8_t pv_count =
+            cache.connected_pv_inputs == 0 ? 2 : cache.connected_pv_inputs;
+        for (std::uint8_t pv = 0; pv < pv_count && pv < 16; ++pv) {
+            const std::uint16_t voltage_address = 64 + pv * 2;
+            const std::uint16_t current_address = voltage_address + 1;
+            if (!cache.seen[voltage_address] || !cache.seen[current_address]) {
+                continue;
+            }
+            pv_power_kw += (cache.values[voltage_address] * 0.1) *
+                           (cache.values[current_address] * 0.1) / 1000.0;
+            pv_power_available = true;
+            pv_power_calculated = true;
+        }
+    } else {
+        pv_power_available = true;
+    }
+
+    bool grid_power_available = false;
+    double grid_power_kw = 0.0;
+    std::uint8_t grid_phase_count = 0;
+    const std::uint16_t grid_voltage_addresses[] = {42, 44, 46};
+    const std::uint16_t grid_current_addresses[] = {43, 45, 47};
+    const std::uint8_t wanted_grid_phases = three_phase ? 3 : 1;
+    double power_factor = 1.0;
+    if (cache.seen[52]) {
+        power_factor = std::fabs(static_cast<std::int16_t>(cache.values[52]) *
+                                 0.0001);
+        if (power_factor > 1.0) power_factor = 1.0;
+    }
+    for (std::uint8_t phase = 0; phase < wanted_grid_phases; ++phase) {
+        const std::uint16_t voltage_address = grid_voltage_addresses[phase];
+        const std::uint16_t current_address = grid_current_addresses[phase];
+        if (!cache.seen[voltage_address] || !cache.seen[current_address]) {
+            continue;
+        }
+        double current_a = 0.0;
+        signed_input_value(current_address, 0.1, current_a);
+        grid_power_kw += (cache.values[voltage_address] * 0.1) * current_a *
+                         power_factor / 1000.0;
+        ++grid_phase_count;
+        grid_power_available = true;
+    }
+
+    bool inverter_power_available = false;
+    bool inverter_power_calculated = false;
+    double inverter_power_kw = 0.0;
+    const bool inverter_register_power_available =
+        decoded_published_value(345, inverter_power_kw);
+    if (inverter_register_power_available) {
+        inverter_power_available = true;
+    } else if (cache.seen[2] && cache.seen[5]) {
+        inverter_power_kw = (cache.values[2] * 0.1) *
+                            (static_cast<std::int16_t>(cache.values[5]) * 0.1) /
+                            1000.0;
+        inverter_power_available = true;
+        inverter_power_calculated = true;
+    }
+
+    bool load_power_available = false;
+    bool load_power_calculated = false;
+    double load_power_kw = 0.0;
+    if (!decoded_published_value(320, load_power_kw)) {
+        load_power_kw = output_apparent_power_va / 1000.0;
+        load_power_available = output_apparent_power_available;
+        load_power_calculated = output_apparent_power_available;
+    } else {
+        load_power_available = true;
+    }
+
+    bool battery_power_available = false;
+    bool battery_power_from_registers = false;
+    double battery_power_kw = 0.0;
+    double discharge_power_kw = 0.0;
+    double charge_power_kw = 0.0;
+    const bool discharge_power_available =
+        decoded_published_value(349, discharge_power_kw);
+    const bool charge_power_available =
+        decoded_published_value(351, charge_power_kw);
+    if (discharge_power_available || charge_power_available) {
+        battery_power_kw = discharge_power_kw - charge_power_kw;
+        battery_power_available = true;
+        battery_power_from_registers = true;
+    } else if ((cache.enabled_features & inverter::feature_battery) != 0 &&
+               (cache.seen[127] || cache.seen[129]) && cache.seen[141]) {
+        const std::uint16_t voltage_raw =
+            cache.seen[127] ? cache.values[127] : cache.values[129];
+        double battery_current_a = 0.0;
+        signed_input_value(141, 0.01, battery_current_a);
+        battery_power_kw = (voltage_raw * 0.1) * battery_current_a / 1000.0;
+        battery_power_available = true;
+    }
+
+    bool load_percentage_available = false;
+    bool load_percentage_direct = false;
+    double load_percentage = 0.0;
+    const double rated_power_w = cache.rated_power_seen ? cache.rated_power_w :
+        (cache.seen[36] && cache.values[36] == 3008 ? 12000.0 : 0.0);
+    if (cache.seen[344]) {
+        load_percentage_available = true;
+        load_percentage_direct = true;
+        load_percentage = cache.values[344] * 0.01;
+    } else if (rated_power_w > 0.0 && output_apparent_power_available) {
+        load_percentage = output_apparent_power_va * 100.0 / rated_power_w;
+        load_percentage_available = true;
+    }
+
+    cJSON *power_summary = cJSON_AddObjectToObject(root, "power_summary");
+    if (power_summary != nullptr) {
+        if (pv_power_available) {
+            add_decimal_value(power_summary, "pv_kw", pv_power_kw);
+            cJSON_AddStringToObject(
+                power_summary, "pv_source",
+                pv_power_calculated ? "calculated_from_voltage_current"
+                                    : "register");
+        }
+        if (grid_power_available) {
+            add_decimal_value(power_summary, "grid_kw", grid_power_kw);
+            cJSON_AddStringToObject(
+                power_summary, "grid_direction",
+                "positive follows inverter grid-current sign");
+            cJSON_AddNumberToObject(power_summary, "grid_phase_count",
+                                    grid_phase_count);
+        }
+        if (inverter_power_available) {
+            add_decimal_value(power_summary,
+                                    inverter_power_calculated
+                                        ? "inverter_apparent_kva"
+                                        : "inverter_kw",
+                                    inverter_power_kw);
+            cJSON_AddStringToObject(power_summary, "inverter_source",
+                                    inverter_power_calculated
+                                        ? "calculated_from_voltage_current"
+                                        : "register");
+        }
+        if (output_apparent_power_available) {
+            add_decimal_value(power_summary, "output_apparent_kva",
+                                    output_apparent_power_va / 1000.0);
+            cJSON_AddNumberToObject(power_summary, "output_phase_count",
+                                    output_phase_count);
+        }
+        if (load_power_available) {
+            add_decimal_value(power_summary,
+                                    load_power_calculated ? "load_kva"
+                                                          : "load_kw",
+                                    load_power_kw);
+            cJSON_AddStringToObject(power_summary, "load_source",
+                                    load_power_calculated
+                                        ? "calculated_apparent_power"
+                                        : "register");
+        }
+        if (load_percentage_available) {
+            add_decimal_value(power_summary, "load_percentage",
+                                    load_percentage);
+            cJSON_AddStringToObject(power_summary, "load_percentage_source",
+                                    load_percentage_direct ? "register"
+                                                           : "calculated");
+        }
+        if (battery_power_available) {
+            add_decimal_value(power_summary, "battery_kw",
+                                    battery_power_kw);
+            cJSON_AddStringToObject(power_summary, "battery_direction",
+                                    "positive=discharging, negative=charging");
+            cJSON_AddStringToObject(power_summary, "battery_source",
+                                    battery_power_from_registers
+                                        ? "charge_discharge_registers"
+                                        : "calculated_from_voltage_current");
+        }
+    }
+
+    cJSON *sections = cJSON_AddObjectToObject(root, "sections");
+    constexpr const char *section_names[] = {
+        "status", "inverter", "pv", "grid", "output",
+        "battery", "bms", "generator", "parallel", "other",
+    };
+    for (const char *section_name : section_names) {
+        cJSON_AddArrayToObject(sections, section_name);
+    }
+    if (pv_power_available && pv_power_calculated) {
+        add_calculated_section_entry(
+            sections, "pv", "PV total input power",
+            "Calculated from PV voltage/current", "PV", "kW", pv_power_kw,
+            "calculated");
+    }
+    if (grid_power_available) {
+        cJSON *entry = add_calculated_section_entry(
+            sections, "grid", "Grid active power",
+            "Estimated from grid voltage, signed current, and power factor",
+            "GRID", "kW", grid_power_kw, "calculated_signed_current");
+        if (entry != nullptr) {
+            cJSON_AddNumberToObject(entry, "phase_count", grid_phase_count);
+            add_decimal_value(entry, "power_factor", power_factor);
+            cJSON_AddStringToObject(
+                entry, "direction",
+                "positive follows inverter grid-current sign");
+        }
+    }
+    if (inverter_power_available && inverter_power_calculated) {
+        add_calculated_section_entry(
+            sections, "inverter", "Inverter AC apparent power",
+            "Calculated from inverter voltage/current", "INVERTER", "kVA",
+            inverter_power_kw, "calculated");
+    }
+    if (output_apparent_power_available) {
+        cJSON *entry = add_calculated_section_entry(
+            sections, "output", "Output apparent power",
+            "Calculated from EPS output voltage/current", "EPS", "kVA",
+            output_apparent_power_va / 1000.0, "calculated");
+        if (entry != nullptr) {
+            cJSON_AddNumberToObject(entry, "phase_count", output_phase_count);
+        }
+    }
+    if (load_power_available && load_power_calculated) {
+        cJSON *entry = add_calculated_section_entry(
+            sections, "output", "Load apparent power",
+            "Calculated from EPS output voltage/current", "LOAD", "kVA",
+            load_power_kw, "calculated");
+        if (entry != nullptr) {
+            cJSON_AddNumberToObject(entry, "phase_count", output_phase_count);
+        }
+    }
+    if (load_percentage_available && !load_percentage_direct) {
+        cJSON *entry = add_calculated_section_entry(
+            sections, "output", "Output load percentage",
+            "Calculated from EPS output power and rated inverter power",
+            "EPS", "%", load_percentage, "calculated");
+        if (entry != nullptr) {
+            add_decimal_value(entry, "apparent_power_kva",
+                                    output_apparent_power_va / 1000.0);
+            add_decimal_value(entry, "rated_power_kw",
+                                    rated_power_w / 1000.0);
+        }
+    }
+    if (battery_power_available) {
+        cJSON *entry = add_calculated_section_entry(
+            sections, "battery", "Battery power",
+            "Signed battery power: positive discharging, negative charging",
+            "BATTERY", "kW", battery_power_kw,
+            battery_power_from_registers ? "charge_discharge_registers"
+                                         : "calculated");
+        if (entry != nullptr) {
+            cJSON_AddStringToObject(entry, "direction",
+                                    "positive=discharging, negative=charging");
+        }
+    }
+    for (std::uint16_t address = 0; address < input_point_count; ++address) {
+        if (!cache.seen[address]) continue;
+        const auto *descriptor = inverter::find_register(
+            inverter::RegisterSpace::input, address);
+        if (!is_public_descriptor(descriptor) ||
+            !descriptor_is_enabled(*descriptor, cache.enabled_features,
+                                   cache.connected_pv_inputs)) continue;
+        const char *section_name = live_section(*descriptor);
+        cJSON *entries = cJSON_GetObjectItemCaseSensitive(sections, section_name);
+        if (entries == nullptr) continue;
+        cJSON *entry = cJSON_CreateObject();
+        cJSON_AddStringToObject(entry, "name", application_name(*descriptor));
+        cJSON_AddStringToObject(entry, "register_name", descriptor->name);
+        cJSON_AddStringToObject(entry, "description", descriptor->description);
+        cJSON_AddStringToObject(entry, "domain",
+                                inverter::register_domain_name(descriptor->domain));
+        cJSON_AddStringToObject(entry, "unit", engineering_unit(*descriptor));
+        const bool next_seen = address + 1 < input_point_count &&
+                               cache.seen[address + 1];
+        add_application_value(entry, "value", *descriptor,
+                              cache.values.data() + address,
+                              next_seen ? 2 : 1);
+        cJSON_AddItemToArray(entries, entry);
+    }
     char *json = cJSON_PrintUnformatted(root);
     char topic[192]{};
     make_topic(topic, sizeof(topic), message.source_member_id, "live");
     if (json != nullptr) {
-        esp_mqtt_client_publish(client_, topic, json, 0, 0, 0);
+        const int message_id =
+            esp_mqtt_client_publish(client_, topic, json, 0, 0, 0);
+        if (message_id < 0) {
+            ESP_LOGW(tag, "Could not publish live data to %s", topic);
+        }
         cJSON_free(json);
+    } else {
+        ESP_LOGW(tag, "Could not allocate live JSON payload");
     }
     cJSON_Delete(root);
+    cache.last_publish_ms = cache.timestamp_ms;
 }
 
 void MqttBridge::publish_snapshot(const TelemetryMessage &message)
@@ -670,6 +1245,32 @@ void MqttBridge::publish_snapshot(const TelemetryMessage &message)
         message.register_count,
         static_cast<std::uint16_t>(message.registers.size()));
     const std::uint32_t end = static_cast<std::uint32_t>(message.first_register) + count;
+    if (message.source_member_id < maximum_members &&
+        message.first_register <= 182 && end > 182) {
+        LiveCache &cache = live_cache_[message.source_member_id];
+        cache.source_priority =
+            message.registers[182U - message.first_register];
+        cache.source_priority_seen = true;
+    }
+    if (message.source_member_id < maximum_members &&
+        message.first_register <= 63 && end > 64) {
+        const auto *descriptor = inverter::find_register(
+            inverter::RegisterSpace::holding, 63);
+        if (descriptor != nullptr) {
+            const std::size_t offset = 63U - message.first_register;
+            const auto decoded = inverter::decode_numeric_value(
+                *descriptor, message.registers[offset],
+                message.registers[offset + 1], true);
+            // Some FSC models return a placeholder (0.1 W) here.  It is not
+            // a usable inverter rating and must never generate a percentage.
+            if (decoded.valid && decoded.engineering_value >= 500.0 &&
+                decoded.engineering_value <= 100000.0) {
+                LiveCache &cache = live_cache_[message.source_member_id];
+                cache.rated_power_w = decoded.engineering_value;
+                cache.rated_power_seen = true;
+            }
+        }
+    }
     if (message.first_register <= 5 && end >= 13) {
         char serial_number[17]{};
         std::size_t used = 0;
@@ -711,18 +1312,21 @@ void MqttBridge::publish_snapshot(const TelemetryMessage &message)
         const auto *descriptor = inverter::find_register(
             inverter::RegisterSpace::holding, address);
         if (!is_public_descriptor(descriptor) ||
-            descriptor->access == inverter::RegisterAccess::write_only) continue;
+            descriptor->access == inverter::RegisterAccess::write_only ||
+            !descriptor_is_enabled(*descriptor, message.enabled_features,
+                                   message.connected_pv_inputs)) continue;
 
         cJSON *root = cJSON_CreateObject();
         cJSON_AddNumberToObject(root, "member_id", message.source_member_id);
         cJSON_AddNumberToObject(root, "sequence", message.sequence);
         cJSON_AddNumberToObject(root, "uptime_ms",
                                 static_cast<double>(message.timestamp_ms));
-        cJSON_AddStringToObject(root, "name", descriptor->name);
+        cJSON_AddStringToObject(root, "name", application_name(*descriptor));
+        cJSON_AddStringToObject(root, "register_name", descriptor->name);
         cJSON_AddStringToObject(root, "description", descriptor->description);
         cJSON_AddStringToObject(root, "domain",
                                 inverter::register_domain_name(descriptor->domain));
-        cJSON_AddStringToObject(root, "unit", descriptor->unit);
+        cJSON_AddStringToObject(root, "unit", engineering_unit(*descriptor));
         add_application_value(root, "value", *descriptor,
                               message.registers.data() + index,
                               static_cast<std::uint16_t>(count - index));
@@ -760,7 +1364,9 @@ void MqttBridge::publish_alert_changes(const TelemetryMessage &message)
         if (address >= alert_point_count) continue;
         const auto *descriptor = inverter::find_register(
             inverter::RegisterSpace::input, address);
-        if (!is_public_descriptor(descriptor) || !is_alert_descriptor(*descriptor)) continue;
+        if (!is_public_descriptor(descriptor) || !is_alert_descriptor(*descriptor) ||
+            !descriptor_is_enabled(*descriptor, message.enabled_features,
+                                   message.connected_pv_inputs)) continue;
         const std::uint16_t value = message.registers[index];
         const bool seen = alert_seen_[message.source_member_id][address];
         const std::uint16_t previous = alert_values_[message.source_member_id][address];

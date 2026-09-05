@@ -42,8 +42,12 @@ InverterOperatingState decode_state(std::uint16_t raw)
 
 ProductionPoller::ProductionPoller(protocol::ModbusRtuClient &client,
                                    std::uint8_t member_id,
+                                   std::uint8_t connected_pv_inputs,
+                                   std::uint8_t phase_assignment,
                                    network::RuntimeMessageSink &sink)
-    : client_(client), member_id_(member_id), sink_(sink)
+    : client_(client), member_id_(member_id),
+      connected_pv_inputs_(std::min<std::uint8_t>(connected_pv_inputs, 16)),
+      phase_assignment_(phase_assignment), sink_(sink)
 {
     reset();
 }
@@ -73,7 +77,7 @@ void ProductionPoller::run_due(std::uint16_t enabled_features)
     for (std::size_t index = 0; index < plan.size && index < maximum_requests; ++index) {
         const auto &request = plan.data[index];
         if (poll_request_is_enabled(request, enabled_features) && due(index, request, now_ms)) {
-            read_request(index, request, now_ms);
+            read_request(index, request, now_ms, enabled_features);
             return;
         }
     }
@@ -91,36 +95,51 @@ bool ProductionPoller::due(std::size_t index, const PollRequest &request,
 }
 
 void ProductionPoller::read_request(std::size_t index, const PollRequest &request,
-                                    std::int64_t)
+                                    std::int64_t, std::uint16_t enabled_features)
 {
     std::array<std::uint16_t, 125> values{};
-    if (request.register_count > values.size()) return;
+    std::uint16_t register_count = request.register_count;
+    if (request.space == RegisterSpace::input && request.first_register == 40) {
+        register_count = static_cast<std::uint16_t>(
+            24U + 2U * std::min<std::uint8_t>(connected_pv_inputs_, 2));
+    } else if (request.space == RegisterSpace::input && request.first_register == 68) {
+        register_count = connected_pv_inputs_ > 2
+                             ? static_cast<std::uint16_t>(2U * (connected_pv_inputs_ - 2U))
+                             : 0;
+    } else if (request.space == RegisterSpace::input && request.first_register == 252) {
+        register_count = static_cast<std::uint16_t>(2U * connected_pv_inputs_);
+    }
+    if (register_count == 0 || register_count > values.size()) return;
     const bool success = request.space == RegisterSpace::holding
-                             ? client_.read_holding(request.first_register, request.register_count,
+                             ? client_.read_holding(request.first_register, register_count,
                                                     values.data(), values.size())
-                             : client_.read_input(request.first_register, request.register_count,
+                             : client_.read_input(request.first_register, register_count,
                                                   values.data(), values.size());
     const std::int64_t completed_at_ms = esp_timer_get_time() / 1000;
     last_poll_ms_[index] = completed_at_ms;
     if (!success) {
         ESP_LOGW(tag, "%s poll failed (%u:%u+%u)", request.name,
                  static_cast<unsigned>(request.space), request.first_register,
-                 request.register_count);
+                 register_count);
         return;
     }
     completed_once_[index] = true;
-    update_state(request, values.data(), request.register_count);
-    emit(request, values.data(), request.register_count, completed_at_ms);
+    update_state(request, values.data(), register_count);
+    emit(request, values.data(), register_count, completed_at_ms, enabled_features);
 }
 
 void ProductionPoller::emit(const PollRequest &request, const std::uint16_t *values,
-                            std::uint16_t count, std::int64_t timestamp_ms)
+                            std::uint16_t count, std::int64_t timestamp_ms,
+                            std::uint16_t enabled_features)
 {
     std::uint16_t offset = 0;
     while (offset < count) {
         network::TelemetryMessage message{};
         message.source_member_id = member_id_;
         message.register_space = request.space == RegisterSpace::holding ? 0 : 1;
+        message.connected_pv_inputs = connected_pv_inputs_;
+        message.phase_assignment = phase_assignment_;
+        message.enabled_features = enabled_features;
         message.first_register = request.first_register + offset;
         message.register_count = std::min<std::uint16_t>(
             count - offset, static_cast<std::uint16_t>(message.registers.size()));

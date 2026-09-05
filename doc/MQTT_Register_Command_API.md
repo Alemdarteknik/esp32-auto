@@ -56,7 +56,7 @@ In a parallel installation, the Internet-facing ESP publishes every inverter und
 
 | Stream | Purpose | Publish policy |
 |---|---|---|
-| `live` | Repeated voltage, current, power, PV, battery, load, temperature, status and energy samples | QoS 0, not retained |
+| `live` | Repeated voltage, current, instantaneous power, PV, battery, load, temperature, and status samples | QoS 0, not retained |
 | `alert/#` | Inverter faults, warnings, state transitions, derating and BMS faults/warnings | QoS 1, retained per named alert; published only when its value changes |
 | `result` | Correlated response to a named getter or setter | QoS 1, not retained |
 | `snapshot/#` | Serial/model/firmware and current configuration | QoS 1, retained per named item; refreshed after a confirmed setter |
@@ -68,8 +68,8 @@ In a parallel installation, the Internet-facing ESP publishes every inverter und
 
 | Data category | MQTT destination | When it is published |
 |---|---|---|
-| Grid, inverter, PV, battery, BMS, load, generator and power measurements | `live` | Every successful scheduled poll |
-| Energy counters and slower health values | `live` | Every successful normal/slow poll |
+| Grid, inverter, PV, battery, BMS, load, generator and instantaneous power measurements | `live` | One consolidated state after each completed fast polling cycle |
+| Direct inverter energy counters, when supported by the inverter | Explicit getter response | Excluded from `live`; the app calculates energy |
 | Inverter operating status, fault words, main/sub fault codes, warning codes and derating state | `alert/#` | Initial retained state and then only when changed |
 | BMS status, error words, warning words and protected-pack identity | `alert/#` | Initial retained state and then only when changed |
 | Serial number, device identity, firmware, protocol version and configuration | `snapshot/#` | Once after inverter communication starts; retained by broker |
@@ -84,10 +84,51 @@ In a parallel installation, the Internet-facing ESP publishes every inverter und
 | Critical | 1 second | Operating state and inverter fault/warning data |
 | Fast | 5 seconds | Grid, EPS, PV, battery/BMS, power flow and parallel data |
 | Normal | 30 seconds | Extended PV, generator, fan/runtime and normal health data |
-| Slow | 300 seconds | Energy counters |
+| Slow | 300 seconds | Direct inverter energy counters, when the inverter supports them |
 | Boot/setup snapshot | Once per inverter communication session | Serial/model/firmware and configuration |
 
 An alert cannot be emitted faster than the poll containing its source value. Inverter fault changes are normally detected within about one second; BMS fault/warning changes are normally detected within about five seconds.
+
+The `live` payload is assembled from the newest successful values held by the ESP. Fast measurements update every fast cycle, while other included values remain in the payload with their most recently read value. A subscriber therefore receives a complete current state and does not need to combine separate Modbus-block messages. Every topology uses the same JSON structure. `sections.status`, `sections.inverter`, `sections.pv`, `sections.grid`, `sections.output`, `sections.battery`, `sections.bms`, `sections.generator`, `sections.parallel`, and `sections.other` are always present; a section is an empty array when it does not apply or no successful value is available yet.
+
+`power_summary` is the recommended field for the app/server to consume when it needs live power values. The ESP publishes instantaneous power only. It does not integrate energy over time and it does not create daily/monthly/yearly energy counters. The app/server should calculate energy from `power_summary` samples and its own timestamps, so a power cut or ESP restart can be handled by the server history.
+
+`sections.load` and `sections.energy` are omitted. Load measurements, including load percentage, are grouped under `sections.output`; grid-related measurements remain under `sections.grid`. The app/server calculates energy. Explicit energy getters remain available when supported by the inverter.
+
+Live decimal measurements and calculated powers are serialized with two decimal places (`%.2f`), for example `3.52` or `41.50`, as JSON numbers. Integer identifiers, counters and status codes remain integers. Apps may need their own two-decimal display formatting after parsing JSON because numeric parsing does not preserve trailing zeros. Calculations use full precision before formatting.
+
+`power_summary.load_percentage_source` is `register` when input register R344 is available. If R344 is unavailable, the ESP reports `calculated` only when it has valid EPS phase voltage/current measurements and the inverter rated power. The fallback uses the sum of phase apparent power divided by rated power. The same calculated value is also added to `sections.output`.
+
+Signed battery power is published as `power_summary.battery_kw`: positive means the battery is discharging into the inverter/load, negative means the battery is charging, and zero means no battery power flow or no detected current.
+
+`power_summary` may contain these keys when their source values are available:
+
+| Key | Unit | Meaning |
+|---|---|---|
+| `pv_kw` | kW | Total PV input power; direct inverter register preferred, otherwise calculated from connected PV voltage/current |
+| `grid_kw` | kW | Signed grid active-power estimate from grid voltage/current and power factor |
+| `inverter_kw` | kW | Direct inverter system/output active-power register, when available |
+| `inverter_apparent_kva` | kVA | Fallback inverter apparent power calculated from inverter voltage/current |
+| `output_apparent_kva` | kVA | EPS/load-output apparent power calculated from output voltage/current |
+| `load_kw` | kW | Direct total AC power to user/load register, when available |
+| `load_kva` | kVA | Fallback load apparent power calculated from output voltage/current |
+| `load_percentage` | % | Direct R344 load percentage if available, otherwise calculated from output apparent power and rated inverter power |
+| `battery_kw` | kW | Signed battery power; positive discharging, negative charging |
+
+This contract applies independently to member `0` and every parallel member topic. A native three-phase member contains its available R/S/T values. A grouped three-phase member contains the locally connected inverter's values plus its configured `phase_1`, `phase_2`, or `phase_3` assignment. A separate Internet Gateway forwards the same structure without changing the originating member's applicability profile.
+
+Active power is published in `kW`, apparent power in `kVA`, and reactive power in `kvar`. Values are already converted; clients must not apply the source-register scale again.
+
+Live data is filtered by the setup profile of the ESP attached to that inverter:
+
+- `connected_pv_inputs` limits PV voltage, current, and individual power fields to PV1 through the configured count; unused PV-only Modbus blocks are skipped or shortened where the address layout permits.
+- Battery, BMS, and generator fields are published only when that equipment is selected during setup. Dedicated unused Modbus blocks are skipped.
+- Standalone and parallel single-phase inverters omit S/T and other three-phase-only fields.
+- A grouped three-phase installation treats each member as its assigned single-phase unit and reports its assignment as `phase_1`, `phase_2`, or `phase_3`.
+- Native three-phase inverters retain R/S/T measurements.
+- Standalone systems omit parallel-only data; parallel systems retain it.
+- Mixed Modbus blocks may still be read to obtain applicable values, but irrelevant fields from those blocks are not published.
+- `name` is the user-facing measurement name, `register_name` preserves the protocol name for diagnostics, and `unit` is the final engineering unit because `value` is already scaled.
 
 ### Terminus/Linux subscriptions
 
@@ -147,6 +188,114 @@ MQTT wildcard meaning:
 
 For more than one thousand inverters, use one long-lived MQTT client connection with wildcard subscriptions. Do not start one `mosquitto_sub` process or one broker connection per inverter; the CLI commands here are for commissioning and testing.
 
+### Live subscriptions by installation scenario
+
+Live topics use this structure:
+
+```text
+<prefix>/<device-id>/inverter/<member-id>/live
+```
+
+The examples below use broker `192.168.106.45`, port `1883`, default prefix `inverter`, and example device ID `INV-AABBCCDDEEFF`.
+
+#### Standalone single-phase inverter
+
+A standalone inverter is always member `0`:
+
+```bash
+mosquitto_sub -h 192.168.106.45 -p 1883 -v \
+  -t 'inverter/INV-AABBCCDDEEFF/inverter/0/live'
+```
+
+#### Standalone native three-phase inverter
+
+A native three-phase inverter is also member `0`. Its R/S/T phase measurements are carried in the member's live messages:
+
+```bash
+mosquitto_sub -h 192.168.106.45 -p 1883 -v \
+  -t 'inverter/INV-AABBCCDDEEFF/inverter/0/live'
+```
+
+#### Complete parallel installation
+
+Use a single-level `+` wildcard to receive the master and every parallel member:
+
+```bash
+mosquitto_sub -h 192.168.106.45 -p 1883 -v \
+  -t 'inverter/INV-AABBCCDDEEFF/inverter/+/live'
+```
+
+The member topics are:
+
+```text
+inverter/INV-AABBCCDDEEFF/inverter/0/live    coordinator/master
+inverter/INV-AABBCCDDEEFF/inverter/1/live    parallel member 1
+inverter/INV-AABBCCDDEEFF/inverter/2/live    parallel member 2
+inverter/INV-AABBCCDDEEFF/inverter/N/live    parallel member N
+```
+
+#### Parallel master only
+
+```bash
+mosquitto_sub -h 192.168.106.45 -p 1883 -v \
+  -t 'inverter/INV-AABBCCDDEEFF/inverter/0/live'
+```
+
+#### One parallel member only
+
+For example, subscribe to member `2`:
+
+```bash
+mosquitto_sub -h 192.168.106.45 -p 1883 -v \
+  -t 'inverter/INV-AABBCCDDEEFF/inverter/2/live'
+```
+
+#### Parallel three-phase groups
+
+Subscribe to all members. Each member remains individually identifiable, and its telemetry includes the configured phase assignment:
+
+```bash
+mosquitto_sub -h 192.168.106.45 -p 1883 -v \
+  -t 'inverter/INV-AABBCCDDEEFF/inverter/+/live'
+```
+
+#### Separate Internet-gateway arrangement
+
+The coordinator-to-gateway cable does not change the public MQTT tree. Subscribe exactly as for the corresponding standalone or parallel installation. The Internet-facing ESP publishes every routed inverter under its assigned member ID:
+
+```bash
+mosquitto_sub -h 192.168.106.45 -p 1883 -v \
+  -t 'inverter/INV-AABBCCDDEEFF/inverter/+/live'
+```
+
+#### Every installation on a central server
+
+Use one persistent wildcard subscription for all device IDs and all inverter members:
+
+```bash
+mosquitto_sub -h 192.168.106.45 -p 1883 -v \
+  -t 'inverter/+/inverter/+/live'
+```
+
+The first `+` selects any hardware-derived device ID. The second `+` selects any inverter member.
+
+#### Discover device IDs
+
+Subscribe to availability records:
+
+```bash
+mosquitto_sub -h 192.168.106.45 -p 1883 -q 1 -v \
+  -t 'inverter/+/inverter/+/availability'
+```
+
+For commissioning only, inspect every topic under the default prefix:
+
+```bash
+mosquitto_sub -h 192.168.106.45 -p 1883 -v -t 'inverter/#'
+```
+
+Add `-u '<username>' -P '<password>'` to any example when broker authentication is enabled. Replace the broker, port, prefix, device ID and member ID with the values used by the installation.
+
 ### Stream message illustrations
 
 Example live message:
@@ -156,17 +305,59 @@ Example live message:
   "member_id": 0,
   "sequence": 42,
   "uptime_ms": 180500,
-  "data": [
-    {
-      "name": "Vbat",
-      "description": "Battery Voltage",
-      "domain": "BATTERY",
-      "unit": "0.1V",
-      "value": 41.5
-    }
-  ]
+  "connected_pv_inputs": 2,
+  "topology": "standalone_single_phase",
+  "battery_installed": true,
+  "bms_connected": true,
+  "generator_installed": false,
+  "phase": "none",
+  "operating_status": {
+    "value": 1,
+    "running": true,
+    "running_status": "On-grid",
+    "operating_mode_value": 2,
+    "operating_mode": "SBU",
+    "energy_priority": "Load first"
+  },
+  "power_summary": {
+    "pv_kw": 3.3671,
+    "pv_source": "register",
+    "grid_kw": 1.1142,
+    "grid_direction": "positive follows inverter grid-current sign",
+    "grid_phase_count": 1,
+    "inverter_kw": 3.52,
+    "inverter_source": "register",
+    "output_apparent_kva": 3.515,
+    "output_phase_count": 1,
+    "load_kva": 3.515,
+    "load_source": "calculated_apparent_power",
+    "load_percentage": 29.29,
+    "load_percentage_source": "calculated",
+    "battery_kw": -0.18,
+    "battery_direction": "positive=discharging, negative=charging",
+    "battery_source": "charge_discharge_registers"
+  },
+  "sections": {
+    "pv": [
+      {"name": "PV Total Input Power", "register_name": "PpvAll H", "description": "PV Total Input Power", "domain": "PV", "unit": "kW", "value": 0.042}
+    ],
+    "grid": [
+      {"name": "Grid Frequency", "register_name": "Fac", "description": "Grid Frequency", "domain": "GRID", "unit": "Hz", "value": 49.96}
+    ],
+    "output": [
+      {"name": "Output apparent power", "register_name": "", "description": "Calculated from EPS output voltage/current", "domain": "EPS", "unit": "kVA", "value": 3.515, "source": "calculated"},
+      {"name": "Output load percentage", "register_name": "", "description": "Calculated from EPS output power and rated inverter power", "domain": "EPS", "unit": "%", "value": 29.29, "source": "calculated"},
+      {"name": "Total AC power to user", "register_name": "PactouserTotal H", "description": "Total AC power to user", "domain": "LOAD", "unit": "kW", "value": 3.52}
+    ],
+    "battery": [
+      {"name": "Battery Voltage", "register_name": "Vbat", "description": "Battery Voltage", "domain": "BATTERY", "unit": "V", "value": 41.5},
+      {"name": "Battery power", "register_name": "", "description": "Signed battery power: positive discharging, negative charging", "domain": "BATTERY", "unit": "kW", "value": -0.18, "source": "charge_discharge_registers"}
+    ]
+  }
 }
 ```
+
+For dashboards and history logic, read `power_summary` first. The section arrays are useful for detailed screens and diagnostics. The app/server is responsible for calculated energy totals; there is no Energy or separate Load section in `live`.
 
 Example retained warning/fault state:
 

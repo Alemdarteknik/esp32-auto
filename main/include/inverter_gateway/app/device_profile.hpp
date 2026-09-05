@@ -38,7 +38,7 @@ enum class PhaseAssignment : std::uint8_t {
 };
 
 struct DeviceProfile {
-    static constexpr std::uint8_t current_schema_version = 1;
+    static constexpr std::uint8_t current_schema_version = 3;
 
     std::uint8_t schema_version = current_schema_version;
     DeviceRole device_role = DeviceRole::unprovisioned;
@@ -50,6 +50,10 @@ struct DeviceProfile {
     std::uint8_t logical_member_id = 0;
     std::uint8_t modbus_slave_address = 1;
     std::uint8_t espnow_channel = 0;
+    std::uint8_t connected_pv_inputs = 2;
+    bool battery_installed = true;
+    bool bms_connected = true;
+    bool generator_installed = false;
 };
 
 constexpr bool role_has_local_inverter(DeviceRole role)

@@ -150,6 +150,12 @@ ConfigValidation validate_config(const SystemConfig &config)
         config.profile.modbus_slave_address > 247) {
         return ConfigValidation::invalid_counts;
     }
+    if (config.profile.connected_pv_inputs > 16) {
+        return ConfigValidation::invalid_pv_input_count;
+    }
+    if (!config.profile.battery_installed && config.profile.bms_connected) {
+        return ConfigValidation::invalid_battery_configuration;
+    }
     if (config.profile.espnow_channel > 14) {
         return ConfigValidation::espnow_channel_invalid;
     }
@@ -185,6 +191,8 @@ const char *config_validation_name(ConfigValidation result)
     case ConfigValidation::topology_missing: return "topology_missing";
     case ConfigValidation::invalid_counts: return "invalid_counts";
     case ConfigValidation::invalid_member_id: return "invalid_member_id";
+    case ConfigValidation::invalid_pv_input_count: return "invalid_pv_input_count";
+    case ConfigValidation::invalid_battery_configuration: return "invalid_battery_configuration";
     case ConfigValidation::site_id_required: return "site_id_required";
     case ConfigValidation::wifi_required: return "wifi_required";
     case ConfigValidation::mqtt_required: return "mqtt_required";
